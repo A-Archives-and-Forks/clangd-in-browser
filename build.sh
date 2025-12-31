@@ -6,21 +6,27 @@
 # 0. Configs
 
 # sudo apt install vim git build-essential cmake ninja-build python3
+set -e
 
 ## Note: Better to make sure WASI SDK version matches the LLVM version
-EMSDK_VER=3.1.52
-WASI_SDK_VER=22.0
-WASI_SDK_VER_MAJOR=22
-LLVM_VER=18.1.2
-LLVM_VER_MAJOR=18
+EMSDK_VER=4.0.22
+WASI_SDK_VER=29.0
+WASI_SDK_VER_MAJOR=29
+LLVM_VER=21.1.0
+LLVM_VER_MAJOR=21
 
 WORKSPACE_DIR=$PWD
-ROOT_DIR=$(mktemp -d)
+ROOT_DIR=${ROOT_DIR:-$(mktemp -d)}
 cd $ROOT_DIR
+echo "Working directory: $ROOT_DIR"
 
 # 1. Get Emscripten
 
-git clone --branch $EMSDK_VER --depth 1 https://github.com/emscripten-core/emsdk
+if [[ -d emsdk ]]; then
+    echo "Emscripten SDK already exists, skipping clone."
+else
+    git clone --branch $EMSDK_VER --depth 1 https://github.com/emscripten-core/emsdk
+fi
 pushd emsdk
 ./emsdk install $EMSDK_VER
 ./emsdk activate $EMSDK_VER
@@ -29,11 +35,20 @@ popd
 
 # 2. Prepare WASI sysroot
 
-wget -O- https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK_VER_MAJOR/wasi-sysroot-$WASI_SDK_VER.tar.gz | tar -xz
+if [[ -d wasi-sysroot-$WASI_SDK_VER ]]; then
+    echo "WASI sysroot already exists, skipping download."
+else
+    wget -O- https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK_VER_MAJOR/wasi-sysroot-$WASI_SDK_VER.tar.gz | tar -xz
+fi
 
 # 3. Build LLVM
 
-git clone --branch llvmorg-$LLVM_VER --depth 1 https://github.com/llvm/llvm-project
+if [[ -d llvm-project ]]; then
+    echo "LLVM project already exists, skipping clone."
+else
+    git clone --branch llvmorg-$LLVM_VER --depth 1 https://github.com/llvm/llvm-project
+fi
+
 cd llvm-project
 
 ## Build native tools first
@@ -43,7 +58,11 @@ cmake -G Ninja -S llvm -B build-native \
 cmake --build build-native --target llvm-tblgen clang-tblgen
 
 ## Apply a patch for blocking stdin read
-git apply $WORKSPACE_DIR/wait_stdin.patch
+if [[ -f $ROOT_DIR/llvm-project/.patched-wait-stdin ]]; then
+    echo "Patch for wait_stdin already applied, skipping."
+else
+    git apply $WORKSPACE_DIR/wait_stdin.patch && touch $ROOT_DIR/llvm-project/.patched-wait-stdin
+fi
 
 ## Build clangd (1st time, just for compiler headers)
 emcmake cmake -G Ninja -S llvm -B build \
@@ -70,12 +89,12 @@ emcmake cmake -G Ninja -S llvm -B build \
 cmake --build build --target clangd
 
 ## Copy installed headers to WASI sysroot
-cp -r build/lib/clang/$LLVM_VER_MAJOR/include/* $ROOT_DIR/wasi-sysroot/include/
+cp -r build/lib/clang/$LLVM_VER_MAJOR/include/* $ROOT_DIR/wasi-sysroot-$WASI_SDK_VER/include/
 
 ## Build clangd (2nd time, for the real thing)
 emcmake cmake -G Ninja -S llvm -B build \
     -DCMAKE_CXX_FLAGS="-pthread -Dwait4=__syscall_wait4" \
-    -DCMAKE_EXE_LINKER_FLAGS="-pthread -s ENVIRONMENT=worker -s NO_INVOKE_RUN -s EXIT_RUNTIME -s INITIAL_MEMORY=2GB -s ALLOW_MEMORY_GROWTH -s MAXIMUM_MEMORY=4GB -s STACK_SIZE=256kB -s EXPORTED_RUNTIME_METHODS=FS,callMain -s MODULARIZE -s EXPORT_ES6 -s WASM_BIGINT -s ASSERTIONS -s ASYNCIFY -s PTHREAD_POOL_SIZE='Math.max(navigator.hardwareConcurrency, 8)' --embed-file=$ROOT_DIR/wasi-sysroot/include@/usr/include" \
+    -DCMAKE_EXE_LINKER_FLAGS="-pthread -s ENVIRONMENT=worker -s NO_INVOKE_RUN -s EXIT_RUNTIME -s INITIAL_MEMORY=2GB -s ALLOW_MEMORY_GROWTH -s MAXIMUM_MEMORY=4GB -s STACK_SIZE=256kB -s EXPORTED_RUNTIME_METHODS=FS,callMain -s MODULARIZE -s EXPORT_ES6 -s WASM_BIGINT -s ASSERTIONS -s ASYNCIFY -s PTHREAD_POOL_SIZE='Math.max(navigator.hardwareConcurrency, 8)' --embed-file=$ROOT_DIR/wasi-sysroot-$WASI_SDK_VER/include@/usr/include" \
     -DCMAKE_BUILD_TYPE=MinSizeRel \
     -DLLVM_TARGET_ARCH=wasm32-emscripten \
     -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \

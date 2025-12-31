@@ -4,7 +4,7 @@ export const FILE_PATH = "/home/web_user/main.cpp";
 
 export const COMPILE_ARGS = [
   "-xc++",
-  "-std=c++2b",
+  "-std=c++2c",
   "-pedantic-errors",
   "-Wall",
 ];
